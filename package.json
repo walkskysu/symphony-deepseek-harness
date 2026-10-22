@@ -1,0 +1,43 @@
+{
+  "name": "symphony-deepseek",
+  "version": "0.1.0",
+  "description": "Symphony-compatible long-running daemon that orchestrates coding agents (DeepSeek Harness CLI or Codex app-server) against GitHub issues.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "symphony": "./dist/src/bin.js"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "examples",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "start": "node dist/src/bin.js",
+    "dev": "npm run build && node dist/src/bin.js",
+    "test": "npm run build && node --test --experimental-test-isolation=none \"dist/test/*.test.js\"",
+    "demo": "npm run build && node examples/memory/demo.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.2"
+  }
+}
