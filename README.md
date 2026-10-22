@@ -97,6 +97,10 @@ Key behaviors (all covered by the test suite):
 
 - **One workspace per issue**, deterministic and reused across runs: `<workspace.root>/<workspace_key>`.
   Identifiers that need sanitizing get a 64-bit hash suffix so `a/b` and `a b` never collide.
+  `hooks.after_create` therefore runs only once per workspace: after an out-of-band push to the
+  repository, delete that workspace so the next attempt clones the new code
+  (`Remove-Item -Recurse -Force <workspace.root>\<workspace_key>`, the key appears as `workspace=` in the
+  hook log line).
 - **Claims**: an issue is dispatched only when it is not running, not claimed, active, not terminal,
   adapter-dispatchable, label-matched, and a global + per-state slot is free.
 - **Reconciliation every tick**: stall detection from the last agent event, then a tracker refresh that

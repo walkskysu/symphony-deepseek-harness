@@ -195,6 +195,23 @@ describe('value coercion and validation', () => {
     );
   });
 
+  it('resolves a harness.command from a whole-value environment reference', () => {
+    const config = makeConfig({
+      frontMatter: `${BASE}\nharness:\n  kind: dsh\n  command: $MY_DSH`,
+      env: { MY_DSH: 'C:/tools/dsh.cmd' },
+    });
+    assert.equal(config.harness.command, 'C:/tools/dsh.cmd');
+  });
+
+  it('rejects a harness.command that references an unset variable', () => {
+    assert.throws(
+      () => makeConfig({ frontMatter: `${BASE}\nharness:\n  kind: dsh\n  command: $MISSING_CMD`, env: {} }),
+      (error: unknown) =>
+        error instanceof ValidationError &&
+        error.problems.some((p) => p.code === 'missing_harness_command' && /MISSING_CMD/.test(p.message)),
+    );
+  });
+
   it('defaults the dsh command to `dsh` and keeps harness args', () => {
     const config = makeConfig({
       frontMatter: `${BASE}\nharness:\n  kind: dsh\n  args: ["--profile", "headless"]\n  model: deepseek-chat`,

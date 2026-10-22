@@ -22,6 +22,12 @@
 # repository into a per-issue workspace, runs the DeepSeek Harness agent, and the
 # agent moves the issue to `status:review` (or `status:blocked`) when it is done.
 # Reaching `status:done` stops the run and removes the workspace.
+#
+# Workspaces are reused, and `after_create` runs only when one is created. If you
+# push to this repository after a workspace already exists, that workspace keeps
+# the old checkout (and `npm ci` then fails on the missing lockfile). Reset it:
+#   Remove-Item -Recurse -Force "$env:USERPROFILE\.symphony\workspaces\symphony-deepseek-harness\<workspace-key>"
+# The key is the directory name under that root (it is logged as `workspace`).
 tracker:
   kind: github
   provider:
@@ -71,6 +77,10 @@ agent:
 harness:
   kind: dsh
   profile: headless
+  # Path to the dsh CLI. `$DSH_COMMAND` lives in .env because an npx install is
+  # not on PATH for a plain shell. After `npm i -g @deepseek-ai/dsh` you can
+  # delete this line and the .env entry, and the backend falls back to `dsh`.
+  command: $DSH_COMMAND
 
 codex:
   turn_timeout_ms: 3600000   # max silence during one turn

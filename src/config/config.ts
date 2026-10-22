@@ -329,7 +329,16 @@ export function resolveConfig(definition: WorkflowDefinition, options: ResolveCo
   let codexCommand = DEFAULT_CODEX_COMMAND;
   if (typeof codexCommandRaw === 'string' && codexCommandRaw.trim() !== '') {
     const resolved = resolveEnvReference(codexCommandRaw, env);
-    codexCommand = resolved === null ? codexCommandRaw.trim() : resolved;
+    if (resolved === null) {
+      // A whole-value $VAR that resolves to nothing is a configuration error,
+      // not a command literally named "$FOO".
+      problems.push({
+        code: 'invalid_codex_command',
+        message: `codex.command references an unset or empty environment variable: ${codexCommandRaw.trim()}`,
+      });
+    } else {
+      codexCommand = resolved;
+    }
   } else if (codexCommandRaw !== undefined && codexCommandRaw !== null) {
     problems.push({ code: 'invalid_codex_command', message: 'codex.command must be a non-empty string' });
   }
@@ -359,7 +368,14 @@ export function resolveConfig(definition: WorkflowDefinition, options: ResolveCo
       problems.push({ code: 'missing_harness_command', message: 'harness.command must not be empty when set' });
     } else {
       const resolved = resolveEnvReference(harnessCommandRaw, env);
-      harnessCommand = resolved === null ? harnessCommandRaw.trim() : resolved;
+      if (resolved === null) {
+        problems.push({
+          code: 'missing_harness_command',
+          message: `harness.command references an unset or empty environment variable: ${harnessCommandRaw.trim()}`,
+        });
+      } else {
+        harnessCommand = resolved;
+      }
     }
   }
   if (harnessCommand.trim() === '') {
