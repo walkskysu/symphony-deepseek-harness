@@ -37,6 +37,50 @@ interface DshJsonEvent {
   [key: string]: unknown;
 }
 
+interface TurnEndReason {
+  /** Lowercased reason kind, e.g. `completed`, `aborted`, `error`. */
+  kind: string;
+  /** Human-readable detail, for example `MISSING_CREDENTIAL: no API key ...`. */
+  message: string | null;
+}
+
+/**
+ * Read the `status.turn_end` reason.
+ *
+ * Newer DSH builds send an object — `{ "kind": "error", "error": { "message",
+ * "code" } }` or `{ "kind": "completed" }` — while earlier builds sent a plain
+ * string. Both shapes are accepted here; losing the object shape made every
+ * in-turn failure look like `port_exit` with no explanation.
+ */
+export function parseTurnEndReason(value: unknown): TurnEndReason | null {
+  if (typeof value === 'string') {
+    const kind = value.trim().toLowerCase();
+    return kind === '' ? null : { kind, message: null };
+  }
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const error = typeof record['error'] === 'object' && record['error'] !== null
+    ? (record['error'] as Record<string, unknown>)
+    : null;
+  const rawKind = typeof record['kind'] === 'string'
+    ? record['kind']
+    : typeof record['reason'] === 'string'
+      ? record['reason']
+      : typeof error?.['code'] === 'string'
+        ? 'error'
+        : '';
+  const kind = rawKind.trim().toLowerCase();
+  const detail = typeof error?.['message'] === 'string'
+    ? error['message']
+    : typeof record['message'] === 'string'
+      ? record['message']
+      : null;
+  const code = typeof error?.['code'] === 'string' ? error['code'] : null;
+  const message = detail !== null && code !== null ? `${code}: ${detail}` : detail;
+  if (kind === '' && message === null) return null;
+  return { kind: kind === '' ? 'error' : kind, message };
+}
+
 function toNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -98,13 +142,15 @@ export class DshSession implements AgentSession {
       planProgram(this.options.config.harness.command, [...config.harness.args, ...args]);
 
     let turnId: string | null = null;
-    let turnReason: string | null = null;
+    let turnReason: TurnEndReason | null = null;
     let errorMessage: string | null = null;
     let finalText: string | null = null;
     let malformed = 0;
     let sawLine = false;
     let silenceExpired = false;
     let watchdog: NodeJS.Timeout | null = null;
+    /** Last few stderr lines, so a bare exit code still carries a cause. */
+    const stderrTail: string[] = [];
 
     const emit = (event: AgentEvent): void => {
       if (event.event === 'session_started') this.started = true;
@@ -212,16 +258,21 @@ export class DshSession implements AgentSession {
             return;
           }
           if (phase === 'turn_end') {
-            turnReason = typeof event['reason'] === 'string' ? event['reason'] : null;
-            const cancelled = turnReason !== null && CANCELLED_REASONS.has(turnReason.toLowerCase());
+            turnReason = parseTurnEndReason(event['reason']);
+            const kind = turnReason?.kind ?? '';
+            const eventName = COMPLETED_REASONS.has(kind)
+              ? 'turn_completed'
+              : CANCELLED_REASONS.has(kind)
+                ? 'turn_cancelled'
+                : 'turn_failed';
             emit(
               makeAgentEvent(
                 {
-                  event: cancelled ? 'turn_cancelled' : 'turn_completed',
+                  event: eventName,
                   thread_id: this.thread,
                   turn_id: turnId,
                   session_id: composeSessionId(this.thread, turnId),
-                  message: `turn ended reason=${turnReason ?? 'unknown'}`,
+                  message: turnReason?.message ?? `turn ended reason=${kind || 'unknown'}`,
                 },
                 this.currentPid,
               ),
@@ -359,6 +410,8 @@ export class DshSession implements AgentSession {
       onStderrLine: (line) => {
         if (line.trim() === '') return;
         armWatchdog(config.codex.turn_timeout_ms);
+        stderrTail.push(line.trim());
+        if (stderrTail.length > 5) stderrTail.shift();
         this.options.logger.debug('agent stderr', {
           process: plan.description,
           line: line.slice(0, 500),
@@ -381,10 +434,12 @@ export class DshSession implements AgentSession {
     // Read the turn outcome through typed locals: the values are assigned inside
     // the stdout callback, which control-flow analysis cannot track.
     const endedTurnId = turnId as string | null;
-    const endedReason = turnReason as string | null;
+    const endedReason = turnReason as TurnEndReason | null;
     const endedError = errorMessage as string | null;
     const endedText = finalText as string | null;
     const turnSessionId = composeSessionId(this.thread, endedTurnId);
+    const stderrHint = stderrTail.length === 0 ? '' : ` [stderr: ${stderrTail.join(' | ').slice(0, 300)}]`;
+    const reasonKind = endedReason?.kind ?? '';
 
     if (options.signal.aborted) {
       emit(
@@ -405,7 +460,7 @@ export class DshSession implements AgentSession {
       return { ok: false, error: { category, message }, session_id: turnSessionId, turn_id: endedTurnId, final_text: endedText };
     }
     if (silenceExpired) {
-      const message = `no agent output for ${sawLine ? config.codex.turn_timeout_ms : config.codex.read_timeout_ms}ms`;
+      const message = `no agent output for ${sawLine ? config.codex.turn_timeout_ms : config.codex.read_timeout_ms}ms${stderrHint}`;
       return { ok: false, error: { category: 'turn_timeout', message }, session_id: turnSessionId, turn_id: endedTurnId, final_text: endedText };
     }
     if (endedError !== null) {
@@ -417,10 +472,25 @@ export class DshSession implements AgentSession {
         final_text: endedText,
       };
     }
-    if (endedReason !== null && CANCELLED_REASONS.has(endedReason.toLowerCase())) {
+    if (CANCELLED_REASONS.has(reasonKind)) {
       return {
         ok: false,
-        error: { category: 'turn_cancelled', message: `turn ended reason=${endedReason}` },
+        error: { category: 'turn_cancelled', message: endedReason?.message ?? `turn ended reason=${reasonKind}` },
+        session_id: turnSessionId,
+        turn_id: endedTurnId,
+        final_text: endedText,
+      };
+    }
+    // A turn-level failure reason is more informative than the exit code, so it
+    // wins: DSH reports the cause here (for example MISSING_CREDENTIAL) and then
+    // exits non-zero.
+    if (endedReason !== null && reasonKind !== '' && !COMPLETED_REASONS.has(reasonKind)) {
+      return {
+        ok: false,
+        error: {
+          category: 'turn_failed',
+          message: endedReason.message ?? `turn ended reason=${reasonKind}`,
+        },
         session_id: turnSessionId,
         turn_id: endedTurnId,
         final_text: endedText,
@@ -431,17 +501,8 @@ export class DshSession implements AgentSession {
         ok: false,
         error: {
           category: 'port_exit',
-          message: `agent process exited with code ${result.code ?? 'null'}${result.signal === null ? '' : ` (signal ${result.signal})`}`,
+          message: `agent process exited with code ${result.code ?? 'null'}${result.signal === null ? '' : ` (signal ${result.signal})`}${endedReason?.message === null || endedReason?.message === undefined ? '' : `: ${endedReason.message}`}${stderrHint}`,
         },
-        session_id: turnSessionId,
-        turn_id: endedTurnId,
-        final_text: endedText,
-      };
-    }
-    if (endedReason !== null && !COMPLETED_REASONS.has(endedReason.toLowerCase())) {
-      return {
-        ok: false,
-        error: { category: 'turn_failed', message: `turn ended reason=${endedReason}` },
         session_id: turnSessionId,
         turn_id: endedTurnId,
         final_text: endedText,

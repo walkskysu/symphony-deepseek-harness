@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 
-import { DshBackend, usageFromDsh } from '../src/agent/dsh.js';
+import { DshBackend, parseTurnEndReason, usageFromDsh } from '../src/agent/dsh.js';
 import type { AgentEvent } from '../src/agent/events.js';
 import type { ProgramPlan } from '../src/platform/launch.js';
 import { makeConfig, makeIssue, logger, tempDir } from './helpers.js';
@@ -32,14 +32,22 @@ if (mode === 'hang') {
     process.exit(1);
   }
   if (mode === 'turnfail') {
-    send({ type: 'status', phase: 'turn_end', turn: 1, reason: 'error' });
+    send({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'error', error: { message: 'provider exploded', code: 'PROVIDER_ERROR' } } });
     process.exit(0);
+  }
+  if (mode === 'reasononly') {
+    // The shape real DSH emits on an in-turn failure: an object reason, then a
+    // non-zero exit. The reason must win over the exit code.
+    process.stderr.write('dsh: MISSING_CREDENTIAL: no API key for provider route "deepseek-official"\\n');
+    send({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'error', error: { message: 'no API key for provider route "deepseek-official"', code: 'MISSING_CREDENTIAL' } } });
+    send({ type: 'final', text: '' });
+    process.exit(1);
   }
   if (mode === 'aborted') {
-    send({ type: 'status', phase: 'turn_end', turn: 1, reason: 'aborted' });
+    send({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'aborted' } });
     process.exit(0);
   }
-  send({ type: 'status', phase: 'turn_end', turn: 1, reason: 'completed' });
+  send({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
   send({ type: 'final', text: 'all done' });
   send({ type: 'unknown_future_event', detail: 1 });
   process.exit(0);
@@ -167,6 +175,21 @@ describe('dsh headless event mapping', () => {
       const result = await session.runTurn({ prompt: 'go', title: 't', onEvent: () => undefined, signal: new AbortController().signal });
       assert.equal(result.ok, false);
       assert.equal(result.error?.category, 'turn_failed');
+      assert.match(result.error?.message ?? '', /PROVIDER_ERROR: provider exploded/);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it('prefers the turn_end reason over the exit code', async () => {
+    const harness = await makeDsh('reasononly');
+    try {
+      const session = await harness.backend.startSession(baseStart(harness.workspace, 'reasononly'));
+      const result = await session.runTurn({ prompt: 'go', title: 't', onEvent: () => undefined, signal: new AbortController().signal });
+      assert.equal(result.ok, false);
+      assert.equal(result.error?.category, 'turn_failed', 'a non-zero exit with an error reason is a turn failure');
+      assert.match(result.error?.message ?? '', /MISSING_CREDENTIAL/);
+      assert.match(result.error?.message ?? '', /no API key/);
     } finally {
       await harness.cleanup();
     }
@@ -231,6 +254,24 @@ describe('dsh headless event mapping', () => {
     } finally {
       await harness.cleanup();
     }
+  });
+});
+
+describe('turn_end reason parsing', () => {
+  it('accepts the object shape current DSH emits', () => {
+    assert.deepEqual(parseTurnEndReason({ kind: 'completed' }), { kind: 'completed', message: null });
+    assert.deepEqual(
+      parseTurnEndReason({ kind: 'error', error: { message: 'no API key', code: 'MISSING_CREDENTIAL' } }),
+      { kind: 'error', message: 'MISSING_CREDENTIAL: no API key' },
+    );
+    assert.deepEqual(parseTurnEndReason({ kind: 'aborted' }), { kind: 'aborted', message: null });
+  });
+
+  it('still accepts a plain string reason from earlier builds', () => {
+    assert.deepEqual(parseTurnEndReason('completed'), { kind: 'completed', message: null });
+    assert.deepEqual(parseTurnEndReason('Aborted'), { kind: 'aborted', message: null });
+    assert.equal(parseTurnEndReason(''), null);
+    assert.equal(parseTurnEndReason(null), null);
   });
 });
 
