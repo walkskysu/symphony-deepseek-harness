@@ -35,6 +35,7 @@ describe('shipped example workflows', () => {
     assert.equal(config.agent.max_concurrent_agents_by_state['in-progress'], 2);
     assert.equal(config.server.port, 4173);
     assert.match(config.hooks.after_create ?? '', /git clone/);
+    assert.match(config.hooks.after_create ?? '', /SYMPHONY_ISSUE_NATIVE_REF/);
     assert.equal(config.hooks.timeout_ms, 600_000);
 
     const issue = makeIssue({

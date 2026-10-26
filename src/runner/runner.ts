@@ -43,6 +43,23 @@ export interface AttemptResult {
   final_text: string | null;
 }
 
+/**
+ * Non-secret issue context exposed to workspace hooks. It lets one workflow
+ * cover several repositories: `after_create` can read `native_ref` (for
+ * example GitHub's `repository`) and clone the issue's repository instead of a
+ * hard-coded one. The values are the normalized issue fields, never credentials.
+ */
+export function hookEnvironmentForIssue(issue: Issue): Record<string, string> {
+  const environment: Record<string, string> = {
+    SYMPHONY_ISSUE_ID: issue.id,
+    SYMPHONY_ISSUE_IDENTIFIER: issue.identifier,
+    SYMPHONY_ISSUE_TITLE: issue.title,
+  };
+  if (issue.url !== null) environment['SYMPHONY_ISSUE_URL'] = issue.url;
+  if (issue.native_ref !== null) environment['SYMPHONY_ISSUE_NATIVE_REF'] = JSON.stringify(issue.native_ref);
+  return environment;
+}
+
 class AttemptFailure extends Error {
   readonly category: FailureKind;
 
@@ -64,11 +81,13 @@ export class AgentRunner {
     let turns = 0;
     let finalText: string | null = null;
     let credential: { token: string } | null = null;
+    let currentIssue = issue;
+    let hookEnvironment = hookEnvironmentForIssue(currentIssue);
     let outcome: WorkerOutcome;
 
     try {
       callbacks.onPhase('PreparingWorkspace');
-      const workspace = await this.deps.workspace.ensure(issue.identifier).catch((error: unknown) => {
+      const workspace = await this.deps.workspace.ensure(issue.identifier, hookEnvironment).catch((error: unknown) => {
         throw new AttemptFailure('workspace_error', `workspace preparation failed: ${describeError(error)}`);
       });
       workspacePath = workspace.path;
@@ -79,7 +98,7 @@ export class AgentRunner {
         throw new AttemptFailure('invalid_workspace_cwd', `workspace cwd does not match the issue workspace: ${workspace.path}`);
       }
 
-      const beforeRunError = await this.deps.workspace.beforeRun(workspace.path, issue.identifier).then(
+      const beforeRunError = await this.deps.workspace.beforeRun(workspace.path, issue.identifier, hookEnvironment).then(
         () => null,
         (error: unknown) => describeError(error),
       );
@@ -114,7 +133,6 @@ export class AgentRunner {
       });
 
       const maxTurns = config.agent.max_turns;
-      let currentIssue = issue;
       const title = this.deps.backend.sessionTitle(currentIssue);
 
       for (;;) {
@@ -166,6 +184,7 @@ export class AgentRunner {
         }
         const next = refreshed.value[0] as Issue;
         currentIssue = next;
+        hookEnvironment = hookEnvironmentForIssue(next);
         callbacks.onIssueRefreshed(next);
 
         if (!isActiveState(next, config) || !isRoutable(next, config)) break;
@@ -194,7 +213,7 @@ export class AgentRunner {
         }
       }
       if (workspacePath !== null) {
-        await this.deps.workspace.afterRun(workspacePath, issue.identifier);
+        await this.deps.workspace.afterRun(workspacePath, currentIssue.identifier, hookEnvironment);
       }
       if (credential !== null) this.deps.bridge?.releaseRun(credential.token);
     }

@@ -229,6 +229,20 @@ Hooks run with the workspace as cwd, through a local shell: `sh -lc` on POSIX, `
 PATH on Windows, otherwise `powershell -NoProfile -NonInteractive -Command` (a script block, so a
 restricted script-file execution policy does not block it). Override with `hooks.shell`.
 
+Hooks also receive non-secret context for the current issue, which is how a multi-repository workflow
+selects the right checkout:
+
+| Variable | Value |
+|---|---|
+| `SYMPHONY_ISSUE_ID` | Opaque dispatch identity (`owner/repo#number` for GitHub) |
+| `SYMPHONY_ISSUE_IDENTIFIER` | Human-readable identifier, also used for the workspace name |
+| `SYMPHONY_ISSUE_TITLE` | Issue title |
+| `SYMPHONY_ISSUE_URL` | Issue URL, when the tracker provides one |
+| `SYMPHONY_ISSUE_NATIVE_REF` | JSON `native_ref` object (for GitHub: `{repository, number, node_id}`), when present |
+
+The hook environment is still the Symphony process environment plus `.env`, so hooks keep the same
+access they had before. Never put a tracker credential in `native_ref`.
+
 ---
 
 ## Credentials via `.env`
@@ -315,6 +329,39 @@ tracker:
 
 An issue with label `status:in-progress` has state `in-progress`. Configure `active_states` and
 `terminal_states` explicitly here: this adapter intentionally ships no defaults for label mode.
+
+**C. Several repositories in one workflow.** Set `repositories` to a list (or combine it with a single
+`repository`). Every repository is polled with the same state rules, and the union of their issues is
+dispatched through one orchestrator:
+
+```yaml
+tracker:
+  kind: github
+  provider:
+    repositories:
+      - octocat/hello-world
+      - octocat/spoon-knife
+    token: $GITHUB_TOKEN
+  active_states: [open]
+  terminal_states: [closed]
+```
+
+Issue identity and workspace names are repository-qualified (`octocat/hello-world#42`), so numbers that
+collide across repositories stay distinct. Provider-native tools always act on the repository named in
+the issue's `native_ref`, even when the other repository has an issue with the same number. Duplicate
+selectors are ignored case-insensitively.
+
+Because one workflow can now produce workspaces for different repositories, the workspace hooks receive
+the current issue as environment variables. A single `after_create` hook can clone the right repository:
+
+```yaml
+hooks:
+  after_create: |
+    repo="$(node -p "JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository")"
+    git clone --depth 1 "https://github.com/${repo}.git" .
+```
+
+See [Workspace hooks](#workspace-hooks) for the available variables.
 
 See [docs/adapter-github.md](docs/adapter-github.md) for the full adapter profile (keys, pagination,
 normalization, error mapping, tools).

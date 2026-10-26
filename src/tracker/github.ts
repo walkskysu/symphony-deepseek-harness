@@ -37,7 +37,10 @@ const DEFAULT_LABEL_PREFIX = 'status:';
 interface RepoScope {
   owner: string;
   name: string;
+  /** `owner/name` as configured (first spelling wins). */
   full: string;
+  /** Case-insensitive lookup key; GitHub repository names are case-insensitive. */
+  key: string;
 }
 
 export interface GitHubAdapterOptions extends TrackerFactoryArgs {
@@ -102,7 +105,66 @@ function asPositiveInt(value: unknown, fallback: number, min: number, max: numbe
 function parseRepo(value: string): RepoScope | null {
   const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(value.trim().replace(/\.git$/, ''));
   if (match === null) return null;
-  return { owner: match[1] as string, name: match[2] as string, full: `${match[1]}/${match[2]}` };
+  const owner = match[1] as string;
+  const name = match[2] as string;
+  return { owner, name, full: `${owner}/${name}`, key: `${owner}/${name}`.toLowerCase() };
+}
+
+/**
+ * Collect the configured repository scopes.
+ *
+ * `repository` (a single `owner/name`) and `repositories` (a list) are both
+ * accepted and may be combined. Duplicates are ignored case-insensitively
+ * because GitHub treats `Owner/Repo` and `owner/repo` as the same repository;
+ * without that, the same issue could be fetched twice under two identities.
+ */
+function parseRepositoryScopes(provider: Record<string, unknown>): Result<RepoScope[], TrackerError> {
+  const values: string[] = [];
+  const single = provider['repository'];
+  if (single !== undefined && single !== null) {
+    if (typeof single !== 'string') {
+      return err(trackerError('invalid_tracker_config', 'tracker.provider.repository must be a string'));
+    }
+    values.push(single);
+  }
+  const many = provider['repositories'];
+  if (many !== undefined && many !== null) {
+    if (!Array.isArray(many)) {
+      return err(trackerError('invalid_tracker_config', 'tracker.provider.repositories must be a list of `owner/name` strings'));
+    }
+    for (const [index, entry] of many.entries()) {
+      if (typeof entry !== 'string') {
+        return err(
+          trackerError(
+            'invalid_tracker_config',
+            `tracker.provider.repositories[${index}] must be an \`owner/name\` string`,
+          ),
+        );
+      }
+      values.push(entry);
+    }
+  }
+  if (values.length === 0) {
+    return err(
+      trackerError(
+        'invalid_tracker_config',
+        'tracker.provider.repository is required, for example `octocat/hello-world` (or provide `repositories`)',
+      ),
+    );
+  }
+
+  const repositories: RepoScope[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const parsed = parseRepo(value);
+    if (parsed === null) {
+      return err(trackerError('invalid_tracker_config', `invalid repository selector: ${JSON.stringify(value)}`));
+    }
+    if (seen.has(parsed.key)) continue;
+    seen.add(parsed.key);
+    repositories.push(parsed);
+  }
+  return ok(repositories);
 }
 
 function labelNames(value: unknown): string[] {
@@ -200,32 +262,9 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
   /** Validate and build the adapter. Never performs network I/O. */
   static create(args: GitHubAdapterOptions): Result<GitHubTrackerAdapter, TrackerError> {
     const provider = args.provider;
-    const repositoryValues: string[] = [];
-    const single = asString(provider['repository']);
-    if (single !== null) repositoryValues.push(single);
-    const many = provider['repositories'];
-    if (Array.isArray(many)) {
-      for (const entry of many) {
-        const value = asString(entry);
-        if (value !== null) repositoryValues.push(value);
-      }
-    }
-    if (repositoryValues.length === 0) {
-      return err(
-        trackerError(
-          'invalid_tracker_config',
-          'tracker.provider.repository is required, for example `octocat/hello-world` (or provide `repositories`)',
-        ),
-      );
-    }
-    const repositories: RepoScope[] = [];
-    for (const value of repositoryValues) {
-      const parsed = parseRepo(value);
-      if (parsed === null) {
-        return err(trackerError('invalid_tracker_config', `invalid repository selector: ${JSON.stringify(value)}`));
-      }
-      if (!repositories.some((repo) => repo.full === parsed.full)) repositories.push(parsed);
-    }
+    const repositoryScopes = parseRepositoryScopes(provider);
+    if (!repositoryScopes.ok) return repositoryScopes;
+    const repositories = repositoryScopes.value;
 
     const tokenEnvName = asString(provider['token_env']) ?? DEFAULT_TOKEN_ENV;
     const rawToken = asString(provider['token']);
@@ -334,14 +373,19 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
   async fetchIssuesByIds(issueIds: string[]): Promise<Result<Issue[], TrackerError>> {
     if (issueIds.length === 0) return ok([]);
     const issues: Issue[] = [];
+    const seen = new Set<string>();
     for (const id of issueIds) {
+      // Input IDs are a set; a repeated request must not produce a duplicate
+      // normalized issue (SPEC 11.1).
+      if (seen.has(id)) continue;
+      seen.add(id);
       const parsed = parseDispatchId(id);
       if (parsed === null) {
         // Omission is meaningful for ID refresh, so an unparseable requested ID
         // is a failure rather than an invisible record (SPEC 11.1).
         return err(trackerError('tracker_response', `malformed dispatch id: ${JSON.stringify(id)}`));
       }
-      const repo = this.config.repositories.find((candidate) => candidate.full.toLowerCase() === parsed.repo.toLowerCase());
+      const repo = this.config.repositories.find((candidate) => candidate.key === parsed.repo.toLowerCase());
       if (repo === undefined) continue; // No longer visible in the configured scope.
       const response = await this.request(`/repos/${repo.owner}/${repo.name}/issues/${parsed.number}`, { method: 'GET' });
       if (!response.ok) {
@@ -580,7 +624,7 @@ function resolveToolTarget(issue: Issue, repositories: RepoScope[]): ToolTarget 
   const repository = typeof ref['repository'] === 'string' ? ref['repository'] : null;
   const number = typeof ref['number'] === 'number' ? ref['number'] : Number(ref['number']);
   if (repository === null || !Number.isInteger(number)) return null;
-  const repo = repositories.find((candidate) => candidate.full.toLowerCase() === repository.toLowerCase());
+  const repo = repositories.find((candidate) => candidate.key === repository.toLowerCase());
   if (repo === undefined) return null;
   return { repo, number };
 }

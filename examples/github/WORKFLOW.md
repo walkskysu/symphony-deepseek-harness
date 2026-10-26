@@ -7,7 +7,9 @@
 tracker:
   kind: github
   provider:
-    # owner/name of the repository whose issues are the work queue.
+    # owner/name of the repository whose issues are the work queue. To poll
+    # several repositories in one workflow, replace this with:
+    #   repositories: [octocat/hello-world, octocat/spoon-knife]
     repository: octocat/hello-world
     # Resolved from a `.env` file beside this workflow (or the launch
     # environment). Never commit a literal token here.
@@ -33,9 +35,12 @@ workspace:
   root: ~/.symphony/workspaces
 
 hooks:
-  # Runs once, when a workspace is first created. Clone the repository here.
+  # Runs once, when a workspace is first created. Clone the issue's repository
+  # here. The hook environment carries the current issue, so the same workflow
+  # works when `repositories` names more than one repository.
   after_create: |
-    git clone --depth 1 https://github.com/octocat/hello-world.git .
+    repo="$(node -p "JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository")"
+    git clone --depth 1 "https://github.com/${repo}.git" .
   # Runs before every agent attempt. Keep it fast; a failure aborts the attempt.
   before_run: |
     npm ci --no-audit --no-fund

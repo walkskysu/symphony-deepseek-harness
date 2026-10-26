@@ -7,7 +7,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { deriveWorkspaceKey, WorkspaceManager } from '../src/workspace/manager.js';
 import { assertInsideRoot, isPathInside, isWindowsReservedName } from '../src/platform/paths.js';
 import type { HooksConfig } from '../src/config/config.js';
-import { logger, tempDir } from './helpers.js';
+import { hookEnvironmentForIssue } from '../src/runner/runner.js';
+import { logger, makeIssue, tempDir } from './helpers.js';
 
 function hooks(overrides: Partial<HooksConfig> = {}): HooksConfig {
   return {
@@ -53,6 +54,14 @@ describe('workspace key derivation', () => {
     assert.equal(left.replace(/_[0-9a-f]{16}$/, ''), right.replace(/_[0-9a-f]{16}$/, ''));
     assert.match(left, /_[0-9a-f]{16}$/);
     assert.match(right, /_[0-9a-f]{16}$/);
+  });
+
+  it('keeps equal issue numbers from different repositories in distinct workspaces', () => {
+    const alpha = deriveWorkspaceKey('octo/alpha#1');
+    const beta = deriveWorkspaceKey('octo/beta#1');
+    assert.notEqual(alpha, beta);
+    assert.match(alpha, /^octo_alpha_1_[0-9a-f]{16}$/);
+    assert.match(beta, /^octo_beta_1_[0-9a-f]{16}$/);
   });
 
   it('hashes path-hostile and Windows-reserved names', () => {
@@ -176,6 +185,31 @@ describe('workspace manager', () => {
     } finally {
       await dir.cleanup();
     }
+  });
+});
+
+describe('hook issue context', () => {
+  it('exposes the normalized issue and native_ref to hooks', () => {
+    const issue = makeIssue({
+      id: 'octo/beta#7',
+      identifier: 'octo/beta#7',
+      title: 'Fix it',
+      url: 'https://github.com/octo/beta/issues/7',
+      native_ref: { repository: 'octo/beta', number: 7, node_id: 'I_7' },
+    });
+    assert.deepEqual(hookEnvironmentForIssue(issue), {
+      SYMPHONY_ISSUE_ID: 'octo/beta#7',
+      SYMPHONY_ISSUE_IDENTIFIER: 'octo/beta#7',
+      SYMPHONY_ISSUE_TITLE: 'Fix it',
+      SYMPHONY_ISSUE_URL: 'https://github.com/octo/beta/issues/7',
+      SYMPHONY_ISSUE_NATIVE_REF: '{"repository":"octo/beta","number":7,"node_id":"I_7"}',
+    });
+  });
+
+  it('omits optional issue context that is absent', () => {
+    const environment = hookEnvironmentForIssue(makeIssue({ native_ref: null, url: null }));
+    assert.equal(environment['SYMPHONY_ISSUE_NATIVE_REF'], undefined);
+    assert.equal(environment['SYMPHONY_ISSUE_URL'], undefined);
   });
 });
 
