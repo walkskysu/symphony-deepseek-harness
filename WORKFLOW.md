@@ -74,13 +74,13 @@ agent:
     in-progress: 1
 
 # DeepSeek Harness CLI backend. The model is selected by the DSH profile.
+# `harness.command` is omitted on purpose: the backend defaults to `dsh`, which
+# resolves through PATH (installed globally with `npm i -g @deepseek-ai/dsh`).
+# Never point a command at a `DSH_*` variable: DSH reserves its own env names and
+# refuses to start when one of them comes from a `.env` file.
 harness:
   kind: dsh
   profile: headless
-  # Path to the dsh CLI. `$DSH_COMMAND` lives in .env because an npx install is
-  # not on PATH for a plain shell. After `npm i -g @deepseek-ai/dsh` you can
-  # delete this line and the .env entry, and the backend falls back to `dsh`.
-  command: $DSH_COMMAND
 
 codex:
   turn_timeout_ms: 3600000   # max silence during one turn

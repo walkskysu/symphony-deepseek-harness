@@ -241,6 +241,18 @@ export class SymphonyService {
     this.resolvedEnvNames = [...resolution.applied];
     logEnvironmentResolution(this.logger, resolution);
 
+    // DSH reserves its `DSH_*` names for the launching environment and refuses
+    // to start when one of them is supplied through a `.env` file. Symphony
+    // passes `.env` values to the agent child, so warn instead of failing later
+    // with an opaque agent error.
+    const reservedFromFile = resolution.applied.filter((name) => /^DSH_/i.test(name));
+    if (reservedFromFile.length > 0) {
+      this.logger.warn(
+        '.env supplies DSH-reserved variables; DSH refuses to start with them, export them in the launch environment instead',
+        { names: reservedFromFile.join(',') },
+      );
+    }
+
     const definition: WorkflowDefinition = await loadWorkflowFile(this.options.workflowPath);
     const config = resolveConfig(definition, {
       workflowPath: this.options.workflowPath,
