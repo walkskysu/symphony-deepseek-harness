@@ -169,6 +169,7 @@ describe('github adapter configuration', () => {
     const adapter = await makeAdapter({ repository: 'octo/repo' });
     assert.equal(adapter.profile.kind, 'github');
     assert.ok(adapter.profile.tool_names.includes('issue_comment'));
+    assert.ok(adapter.profile.optional_provider_keys['repositories']?.includes('list of owner/name scopes'));
     assert.deepEqual(adapter.profile.default_states, { active_states: ['open'], terminal_states: ['closed'] });
   });
 

@@ -108,8 +108,8 @@ tool bridge does the same for unknown tool names and invalid arguments. Nothing 
 ## Operator checklist
 
 1. Dedicated OS user and a dedicated `workspace.root`.
-2. `GITHUB_TOKEN` scoped to the one repository, with `issues: write` only if the agent needs to update
-   tickets.
+2. `GITHUB_TOKEN` scoped to only the configured repositories, with `issues: write` only if the agent
+   needs to update tickets.
 3. `server.port` left unset if you do not need the dashboard, or bound to `127.0.0.1`.
 4. `hooks.*` reviewed like code — they run with the service's privileges.
 5. `tracker.required_labels` used to keep irrelevant or externally-authored issues out of dispatch.

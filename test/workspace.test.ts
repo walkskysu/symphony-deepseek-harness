@@ -211,6 +211,36 @@ describe('hook issue context', () => {
     assert.equal(environment['SYMPHONY_ISSUE_NATIVE_REF'], undefined);
     assert.equal(environment['SYMPHONY_ISSUE_URL'], undefined);
   });
+
+  it('passes issue context to hook processes and keeps the base environment', async () => {
+    const dir = await tempDir('symphony-hookenv-');
+    try {
+      const marker = join(dir.path, 'hook-env.json');
+      const script =
+        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify({` +
+        `native_ref: process.env.SYMPHONY_ISSUE_NATIVE_REF ?? null,` +
+        `base: process.env.SYMPHONY_TEST_BASE ?? null}));`;
+      const ws = new WorkspaceManager({
+        workspace: { root: dir.path },
+        hooks: hooks({ after_create: script }),
+        logger,
+        env: { SYMPHONY_TEST_BASE: 'kept' },
+        shell: nodeShell,
+      });
+      const issue = makeIssue({
+        id: 'octo/beta#7',
+        identifier: 'octo/beta#7',
+        native_ref: { repository: 'octo/beta', number: 7 },
+      });
+      await ws.ensure(issue.identifier, hookEnvironmentForIssue(issue));
+      assert.deepEqual(JSON.parse(await readFile(marker, 'utf8')), {
+        native_ref: '{"repository":"octo/beta","number":7}',
+        base: 'kept',
+      });
+    } finally {
+      await dir.cleanup();
+    }
+  });
 });
 
 describe('path containment', () => {

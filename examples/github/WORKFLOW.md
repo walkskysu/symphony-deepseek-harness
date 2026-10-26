@@ -39,8 +39,7 @@ hooks:
   # here. The hook environment carries the current issue, so the same workflow
   # works when `repositories` names more than one repository.
   after_create: |
-    repo="$(node -p "JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository")"
-    git clone --depth 1 "https://github.com/${repo}.git" .
+    git clone --depth 1 "https://github.com/$(node -p 'JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository').git" .
   # Runs before every agent attempt. Keep it fast; a failure aborts the attempt.
   before_run: |
     npm ci --no-audit --no-fund

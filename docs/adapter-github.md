@@ -83,9 +83,10 @@ repository:
 ```yaml
 hooks:
   after_create: |
-    repo="$(node -p "JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository")"
-    git clone --depth 1 "https://github.com/${repo}.git" .
+    git clone --depth 1 "https://github.com/$(node -p 'JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository').git" .
 ```
+
+The `$(...)` substitution works in both POSIX shells and PowerShell.
 
 ### Secrets
 

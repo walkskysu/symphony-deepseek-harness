@@ -229,6 +229,8 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
       display_name: 'GitHub Issues',
       required_provider_keys: ['repository (owner/name) or repositories'],
       optional_provider_keys: {
+        repositories:
+          '[] — list of owner/name scopes; combined with `repository` when both are set; duplicates ignored case-insensitively',
         token: 'delegates to $GITHUB_TOKEN unless `token_env` names another variable',
         token_env: DEFAULT_TOKEN_ENV,
         api_base: DEFAULT_API_BASE,

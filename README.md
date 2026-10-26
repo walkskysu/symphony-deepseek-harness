@@ -357,9 +357,10 @@ the current issue as environment variables. A single `after_create` hook can clo
 ```yaml
 hooks:
   after_create: |
-    repo="$(node -p "JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository")"
-    git clone --depth 1 "https://github.com/${repo}.git" .
+    git clone --depth 1 "https://github.com/$(node -p 'JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository').git" .
 ```
+
+The `$(...)` substitution works in both POSIX shells and PowerShell.
 
 See [Workspace hooks](#workspace-hooks) for the available variables.
 
