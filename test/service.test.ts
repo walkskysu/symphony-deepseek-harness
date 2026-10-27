@@ -274,7 +274,10 @@ describe('provider-native tool bridge', () => {
 
       const issue = makeIssue({ id: '1', identifier: 'DEMO-1' });
       const credential = bridge.createRun(issue);
-      assert.ok(credential.env['SYMPHONY_TOOL_TOKEN']);
+      // The grant must not be named *TOKEN/*SECRET/*KEY: DSH scrubs those from
+      // the agent's child processes, which would strip it before the shim runs.
+      assert.ok(credential.env['SYMPHONY_TOOL_GRANT']);
+      assert.equal(credential.env['SYMPHONY_TOOL_TOKEN'], undefined);
       assert.equal(credential.env['SYMPHONY_TOOL_ISSUE_ID'], '1');
 
       const okResponse = await fetch(bridge.url as string, {

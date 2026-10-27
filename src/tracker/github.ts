@@ -19,6 +19,7 @@ import type { Issue } from '../domain/types.js';
 import { ok, err, trackerError, describeError, type Result, type TrackerError } from '../domain/errors.js';
 import type {
   AdapterProfile,
+  PullRequestInput,
   ToolContext,
   ToolResult,
   ToolSpec,
@@ -27,12 +28,15 @@ import type {
 } from './adapter.js';
 import { buildIssue, normalizeLabels, normalizeStateKey } from './normalize.js';
 import { resolveEnvReference } from '../config/config.js';
+import { runProcess } from '../platform/shell.js';
 
 const DEFAULT_API_BASE = 'https://api.github.com';
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_TOKEN_ENV = 'GITHUB_TOKEN';
 const DEFAULT_LABEL_PREFIX = 'status:';
+const DEFAULT_BASE_BRANCH = 'main';
+const GIT_PUSH_TIMEOUT_MS = 180_000;
 
 interface RepoScope {
   owner: string;
@@ -72,6 +76,8 @@ interface ParsedConfig {
    * depends on the order the labels were added.
    */
   statePriority: string[];
+  /** Base branch for pull requests opened from an issue branch. */
+  baseBranch: string;
   requireAssignee: boolean;
   assignee: string | null;
   pageSize: number;
@@ -173,6 +179,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
         state_source: 'issue_state',
         label_prefix: DEFAULT_LABEL_PREFIX,
         state_priority: '[] — when several status labels are present, the first state listed wins',
+        base_branch: DEFAULT_BASE_BRANCH,
         assignee: 'null',
         require_assignee: 'false',
         page_size: String(DEFAULT_PAGE_SIZE),
@@ -281,6 +288,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
     } catch {
       return err(trackerError('invalid_tracker_config', `api_base is not a valid URL: ${JSON.stringify(apiBaseRaw)}`));
     }
+    const baseBranch = asString(provider['base_branch']) ?? DEFAULT_BASE_BRANCH;
 
     return ok(
       new GitHubTrackerAdapter(
@@ -292,6 +300,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
           stateSource,
           labelPrefix: labelPrefix.toLowerCase(),
           statePriority,
+          baseBranch,
           requireAssignee: asBoolean(provider['require_assignee'], false),
           assignee: asString(provider['assignee']),
           pageSize,
@@ -554,6 +563,121 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
   repositoryFullName(target: { repo: RepoScope; number: number }): string {
     return target.repo.full;
   }
+
+  /* ------------------------------------------------ workflow capabilities */
+
+  defaultBaseBranch(): string {
+    return this.config.baseBranch;
+  }
+
+  /**
+   * Push the issue branch to the remote with the configured token.
+   *
+   * The credential rides in a one-off push URL — it is never written to
+   * `.git/config` and never appears in the agent's environment — and every
+   * message this method returns is redacted before it leaves the process.
+   */
+  async pushBranch(context: ToolContext, branch: string): Promise<ToolResult> {
+    const target = resolveToolTarget(context.issue, this.config.repositories);
+    if (target === null) {
+      return { ok: false, error: { category: 'invalid_context', message: 'the current issue has no usable GitHub native_ref' } };
+    }
+    if (context.workspacePath === undefined) {
+      return { ok: false, error: { category: 'invalid_context', message: 'this run has no workspace path' } };
+    }
+    const token = this.config.token;
+    const remote = `https://x-access-token:${encodeURIComponent(token)}@${gitHost(this.config.apiBase)}/${target.repo.full}.git`;
+    const redacted = remote.replace(encodeURIComponent(token), '***').replace(token, '***');
+
+    const result = await runProcess({
+      file: 'git',
+      args: ['-c', 'credential.helper=', 'push', '--force-with-lease', remote, `HEAD:refs/heads/${branch}`],
+      cwd: context.workspacePath,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' },
+      timeoutMs: GIT_PUSH_TIMEOUT_MS,
+    });
+    if (result.spawnError !== null) {
+      return { ok: false, error: { category: 'git_not_found', message: `failed to run git: ${result.spawnError.message}` } };
+    }
+    if (result.code !== 0) {
+      const detail = redactSecrets(`${result.stderr}${result.stdout}`, token).trim().slice(0, 800);
+      return {
+        ok: false,
+        error: {
+          category: result.timedOut ? 'push_timeout' : 'push_failed',
+          message: `git push failed (exit ${result.code ?? 'null'}): ${detail}`,
+        },
+      };
+    }
+    return { ok: true, output: { branch, remote: redacted, pushed: true } };
+  }
+
+  /** Open (or find) the pull request from `input.head` into `input.base`. */
+  async openPullRequest(context: ToolContext, input: PullRequestInput): Promise<ToolResult> {
+    const target = resolveToolTarget(context.issue, this.config.repositories);
+    if (target === null) {
+      return { ok: false, error: { category: 'invalid_context', message: 'the current issue has no usable GitHub native_ref' } };
+    }
+    const repoPath = `/repos/${target.repo.owner}/${target.repo.name}`;
+    const created = await this.request(`${repoPath}/pulls`, {
+      method: 'POST',
+      body: { title: input.title, body: input.body, head: input.head, base: input.base },
+    });
+    if (created.ok) {
+      const pull = created.body as Record<string, unknown> | null;
+      return {
+        ok: true,
+        output: {
+          number: typeof pull?.['number'] === 'number' ? pull['number'] : null,
+          url: typeof pull?.['html_url'] === 'string' ? pull['html_url'] : null,
+          state: typeof pull?.['state'] === 'string' ? pull['state'] : null,
+          existing: false,
+        },
+      };
+    }
+    // GitHub answers 422 when a PR for this head/base already exists; reuse it
+    // instead of failing the whole handoff.
+    if (created.status === 422) {
+      const lookup = await this.request(
+        `${repoPath}/pulls?state=open&head=${encodeURIComponent(`${target.repo.owner}:${input.head}`)}`,
+        { method: 'GET' },
+      );
+      if (lookup.ok && Array.isArray(lookup.body) && lookup.body.length > 0) {
+        const pull = lookup.body[0] as Record<string, unknown>;
+        return {
+          ok: true,
+          output: {
+            number: typeof pull['number'] === 'number' ? pull['number'] : null,
+            url: typeof pull['html_url'] === 'string' ? pull['html_url'] : null,
+            state: typeof pull['state'] === 'string' ? pull['state'] : null,
+            existing: true,
+          },
+        };
+      }
+    }
+    return {
+      ok: false,
+      error: { category: created.error.category, message: redactSecrets(created.error.message, this.config.token) },
+    };
+  }
+}
+
+/** Git host for the configured API base (`api.github.com` → `github.com`). */
+function gitHost(apiBase: string): string {
+  try {
+    return new URL(apiBase).hostname.replace(/^api\./, '');
+  } catch {
+    return 'github.com';
+  }
+}
+
+/** Remove a credential from any text before it is logged or returned. */
+function redactSecrets(text: string, token: string): string {
+  let out = text;
+  if (token !== '') {
+    out = out.split(token).join('***').split(encodeURIComponent(token)).join('***');
+  }
+  return out.replace(/(https:\/\/)[^/@\s]+@/g, '$1***@');
 }
 
 interface ToolTarget {

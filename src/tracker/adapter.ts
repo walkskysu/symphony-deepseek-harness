@@ -23,8 +23,18 @@ export type ToolResult =
 /** Execution context handed to a provider-native tool. */
 export interface ToolContext {
   issue: Issue;
+  /** Absolute path of the issue workspace, for tools that touch the checkout. */
+  workspacePath?: string;
   /** Optional per-invocation cancellation signal. */
   signal?: AbortSignal;
+}
+
+/** Input for opening a pull request from the issue branch. */
+export interface PullRequestInput {
+  head: string;
+  base: string;
+  title: string;
+  body: string;
 }
 
 /**
@@ -57,6 +67,16 @@ export interface TrackerAdapter {
   agentToolSpecs?(): ToolSpec[];
   secretEnvironmentNames?(): string[];
   executeAgentTool?(name: string, args: Record<string, unknown>, context: ToolContext): Promise<ToolResult>;
+  /**
+   * OPTIONAL workflow capabilities for adapters whose provider has branches and
+   * pull requests. The tool bridge advertises `workspace_push` /
+   * `pull_request_open` only when these are implemented, and always executes
+   * them host-side so the agent never receives the git credential.
+   */
+  pushBranch?(context: ToolContext, branch: string): Promise<ToolResult>;
+  openPullRequest?(context: ToolContext, input: PullRequestInput): Promise<ToolResult>;
+  /** Base branch for pull requests, when the adapter opens them (`main`). */
+  defaultBaseBranch?(): string;
   dispose?(): Promise<void> | void;
 }
 

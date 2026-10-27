@@ -88,9 +88,28 @@ export class AgentRunner {
       }
 
       const secretNames = this.deps.tracker.secretEnvironmentNames?.() ?? [];
-      const bridgeCredential = this.deps.bridge?.enabled === true ? this.deps.bridge.createRun(issue) : null;
+      const bridgeCredential = this.deps.bridge?.enabled === true
+        ? this.deps.bridge.createRun(issue, workspace.path)
+        : null;
       credential = bridgeCredential;
-      const env = buildChildEnv(this.deps.parentEnv, secretNames, bridgeCredential?.env ?? {});
+
+      // Declared agent environment (for example DSH_PERMISSION_MODE), minus any
+      // name the adapter declares as a credential, so a workflow cannot leak the
+      // tracker token into the child on purpose.
+      const blocked = new Set(secretNames.map((name) => name.toLowerCase()));
+      const declaredEnv: Record<string, string> = {};
+      for (const [name, value] of Object.entries(config.harness.env)) {
+        if (blocked.has(name.toLowerCase())) {
+          callbacks.onLog('ignoring harness.env entry that collides with a tracker credential name', { name });
+          continue;
+        }
+        declaredEnv[name] = value;
+      }
+
+      const env = buildChildEnv(this.deps.parentEnv, secretNames, {
+        ...declaredEnv,
+        ...(bridgeCredential?.env ?? {}),
+      });
       const toolsHint = config.tools.enabled && config.tools.prompt_hint
         ? renderToolsHint(this.deps.bridge?.tools ?? [], this.deps.bridge?.shim ?? null)
         : null;

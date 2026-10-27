@@ -36,6 +36,8 @@ tracker:
     # State read from the `status:<name>` label; falls back to open/closed.
     state_source: labels
     label_prefix: "status:"
+    # Pull requests opened by the agent target this branch.
+    base_branch: main
   active_states: [todo, in-progress]
   terminal_states: [done, cancelled]
   # Nothing here is required beyond the state label; add labels (for example
@@ -70,6 +72,11 @@ agent:
   max_concurrent_agents: 2
   max_turns: 12
   max_retry_backoff_ms: 300000
+  # A worker that keeps finishing sessions while the issue is still active is
+  # re-dispatched after ~1s (that is the spec's continuation retry). After this
+  # many such sessions the issue is paused until its tracker state changes, so a
+  # runaway loop cannot burn quota silently. Set 0 to disable the guard.
+  max_continuation_cycles: 3
   max_concurrent_agents_by_state:
     in-progress: 1
 
@@ -81,6 +88,12 @@ agent:
 harness:
   kind: dsh
   profile: headless
+  env:
+    # The agent must be able to run `npm test`/`npm ci`, which spawn child
+    # processes with piped stdio. DSH's default `workspace-write` sandbox denies
+    # that, and headless has no approval channel to escalate, so grant full
+    # access for this dedicated per-issue workspace.
+    DSH_PERMISSION_MODE: danger-full-access
 
 codex:
   turn_timeout_ms: 3600000   # max silence during one turn
@@ -121,21 +134,31 @@ adapter profiles and the trust posture.
 6. Never read, print or commit `.env` files or credentials. Tracker credentials are not available to you;
    use the tracker tools below instead.
 7. Commit on a branch named `symphony/{{ issue.identifier | replace: "/", "-" | replace: "#", "-" }}` with a
-   message that starts with `{{ issue.identifier }}`. Do **not** push: leave the commit in the workspace
-   for a human to review and push.
+   message that starts with `{{ issue.identifier }}`. Then publish the work through the tracker tools —
+   never with `git push` yourself, because your environment holds no git credential:
+   - `workspace_push` pushes the branch (the credential is used host-side);
+   - `pull_request_open` opens the pull request into `main` and returns its URL;
+   - put the pull request URL in the ticket comment below.
 8. Record progress on the ticket with the tracker tools:
    - add `status:in-progress` when you start working;
-   - post **one** comment with what changed, how you verified it, and the branch and commit;
+   - post **one** comment with what changed, how you verified it, the branch/commit and the PR URL;
    - when the work is ready for review, add `status:review` and then remove `status:in-progress` and
      `status:todo`, so exactly one `status:*` label remains;
    - if you cannot proceed, add `status:blocked` (and remove the other status labels) and state exactly
      what you need from a human.
-9. Do not close the issue: a human decides the final state.
+9. **Never end a session silently.** Before your final message of every session, either hand the issue
+   off (step 8) or post a comment saying what is still missing and what you will do next. A session that
+   ends with the issue still in `status:in-progress` is treated as "unfinished", and the orchestrator
+   will start another session; after a few such sessions it pauses the issue instead.
+10. If the task turns out to be larger than one session, say so in a comment and stop early rather than
+    looping: the next session continues from your commit.
+11. Do not close the issue: a human decides the final state.
 
 ## Definition of done
 
 - `npm run build`, `npm run typecheck` and `npm test` pass (or the reason they cannot run is documented).
-- The change is committed on the issue branch.
+- The change is committed on the issue branch, pushed, and the open pull request into `main` is linked
+  from the ticket.
 - The ticket carries the status label that reflects the real outcome plus a comment a reviewer can act on.
 
 Write the ticket comment in the language the issue is written in.

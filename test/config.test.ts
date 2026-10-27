@@ -203,6 +203,24 @@ describe('value coercion and validation', () => {
     assert.equal(config.harness.command, 'C:/tools/dsh.cmd');
   });
 
+  it('parses harness.env for the agent process', () => {
+    const config = makeConfig({
+      frontMatter: `${BASE}\nharness:\n  kind: dsh\n  env:\n    DSH_PERMISSION_MODE: danger-full-access\n    MODE_FROM_ENV: $SOME_MODE`,
+      env: { SOME_MODE: 'from-env' },
+    });
+    assert.deepEqual(config.harness.env, {
+      DSH_PERMISSION_MODE: 'danger-full-access',
+      MODE_FROM_ENV: 'from-env',
+    });
+  });
+
+  it('rejects a non-mapping harness.env', () => {
+    assert.throws(
+      () => makeConfig({ frontMatter: `${BASE}\nharness:\n  kind: dsh\n  env: nope` }),
+      (error: unknown) => error instanceof ValidationError && error.problems.some((p) => p.code === 'invalid_harness_env'),
+    );
+  });
+
   it('rejects a harness.command that references an unset variable', () => {
     assert.throws(
       () => makeConfig({ frontMatter: `${BASE}\nharness:\n  kind: dsh\n  command: $MISSING_CMD`, env: {} }),

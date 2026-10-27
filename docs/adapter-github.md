@@ -158,3 +158,24 @@ transport failures return `{"ok":false,"error":{"category","message"}}` and neve
 Note the ordering constraint of label-based states: to hand off an issue, add the target
 `status:<state>` label *before* removing the previous one (the first matching label wins), or set
 `state_source: issue_state` and close the issue.
+
+## Publishing: branch push and pull requests
+
+Two workflow tools are advertised *in addition to* the issue tools whenever the adapter can perform
+them. Both run host-side; the agent only ever sees the result.
+
+| Tool | Arguments | Result |
+|---|---|---|
+| `workspace_push` | `branch?` (defaults to the checked-out branch) | `{branch, remote, pushed: true}` |
+| `pull_request_open` | `title`, `body`, `base?` (defaults to `provider.base_branch`) | `{number, url, state, existing}` |
+
+- `provider.base_branch` (default `main`) is the PR target.
+- The push uses the configured token in a one-off remote URL, so nothing is written to `.git/config`,
+  and every message the tool returns is redacted before leaving the process.
+- Pushes are `--force-with-lease`: the issue workspace is authoritative for its own branch, which makes
+  a re-run after a workspace reset work, while a human's commits on that branch still block the push.
+- `pull_request_open` is idempotent: GitHub answers `422` when a PR already exists for that head/base,
+  and the adapter then returns the existing open PR (`existing: true`).
+
+The token therefore needs `Contents: Read and write` (push) and `Pull requests: Read and write` (PR), in
+addition to `Issues: Read and write` for the issue tools.

@@ -46,6 +46,12 @@ export interface AgentConfig {
   max_turns: number;
   max_retry_backoff_ms: number;
   max_concurrent_agents_by_state: Record<string, number>;
+  /**
+   * How many consecutive sessions may end normally while the issue is still in
+   * an active state before the issue is paused. `0` disables the guard, which
+   * restores the spec's unbounded 1s continuation loop.
+   */
+  max_continuation_cycles: number;
 }
 
 export interface CodexConfig {
@@ -71,6 +77,11 @@ export interface HarnessConfig {
   model: string | null;
   /** Guidance sent to continuation turns inside one worker session. */
   continuation_prompt: string | null;
+  /**
+   * Extra environment variables for the agent process, for example DSH knobs
+   * such as `DSH_PERMISSION_MODE`. Tracker credential names are refused.
+   */
+  env: Record<string, string>;
 }
 
 export interface ToolsConfig {
@@ -119,6 +130,13 @@ const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_CONCURRENT_AGENTS = 10;
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRY_BACKOFF_MS = 300_000;
+/**
+ * Safety net around the specification's 1s continuation retry: a worker that
+ * keeps exiting while the issue is still active would otherwise be re-dispatched
+ * forever. After this many consecutive such sessions the issue is paused until
+ * its tracker state changes. `0` disables the guard.
+ */
+const DEFAULT_MAX_CONTINUATION_CYCLES = 3;
 const DEFAULT_TURN_TIMEOUT_MS = 3_600_000;
 const DEFAULT_READ_TIMEOUT_MS = 5_000;
 const DEFAULT_STALL_TIMEOUT_MS = 300_000;
@@ -307,6 +325,13 @@ export function resolveConfig(definition: WorkflowDefinition, options: ResolveCo
     'agent.max_retry_backoff_ms',
     { min: 0 },
   );
+  const maxContinuationCycles = readInt(
+    agentRaw['max_continuation_cycles'],
+    DEFAULT_MAX_CONTINUATION_CYCLES,
+    problems,
+    'agent.max_continuation_cycles',
+    { min: 0 },
+  );
 
   const byStateRaw = agentRaw['max_concurrent_agents_by_state'];
   const byState: Record<string, number> = {};
@@ -393,6 +418,27 @@ export function resolveConfig(definition: WorkflowDefinition, options: ResolveCo
     'harness.continuation_prompt',
   );
 
+  // Extra agent-process environment, for DSH knobs such as DSH_PERMISSION_MODE.
+  const harnessEnvRaw = harnessRaw['env'];
+  const harnessEnv: Record<string, string> = {};
+  if (harnessEnvRaw !== undefined && harnessEnvRaw !== null) {
+    if (!isRecord(harnessEnvRaw)) {
+      problems.push({ code: 'invalid_harness_env', message: 'harness.env must be a mapping of NAME: value' });
+    } else {
+      for (const [name, rawValue] of Object.entries(harnessEnvRaw)) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          problems.push({ code: 'invalid_harness_env', message: `harness.env has an invalid variable name: ${JSON.stringify(name)}` });
+          continue;
+        }
+        if (typeof rawValue !== 'string' && typeof rawValue !== 'number' && typeof rawValue !== 'boolean') {
+          problems.push({ code: 'invalid_harness_env', message: `harness.env.${name} must be a string` });
+          continue;
+        }
+        harnessEnv[name] = expandEnvString(String(rawValue), env);
+      }
+    }
+  }
+
   const toolsRaw = section(raw, 'tools');
   const toolsEnabled = readBoolean(toolsRaw['enabled'], true, problems, 'tools.enabled');
   const toolsPromptHint = readBoolean(toolsRaw['prompt_hint'], true, problems, 'tools.prompt_hint');
@@ -433,6 +479,7 @@ export function resolveConfig(definition: WorkflowDefinition, options: ResolveCo
       max_turns: maxTurns,
       max_retry_backoff_ms: maxRetryBackoff,
       max_concurrent_agents_by_state: byState,
+      max_continuation_cycles: maxContinuationCycles,
     },
     codex: {
       command: codexCommand,
@@ -454,6 +501,7 @@ export function resolveConfig(definition: WorkflowDefinition, options: ResolveCo
       profile: harnessProfile,
       model: harnessModel,
       continuation_prompt: continuationPrompt,
+      env: harnessEnv,
     },
     tools: { enabled: toolsEnabled, prompt_hint: toolsPromptHint },
     server: { port: serverPort, host: hostRaw !== null && hostRaw.trim() !== '' ? hostRaw.trim() : DEFAULT_SERVER_HOST },

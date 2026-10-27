@@ -206,6 +206,7 @@ Attempt: {{ attempt | default: "first" }}
 | `harness.args` | `[]` | Extra arguments inserted before the backend arguments |
 | `harness.profile` | `headless` | DSH profile passed as `--profile` |
 | `harness.model` | `null` | Codex backend only; DSH chooses its model in the profile |
+| `harness.env` | `{}` | Extra environment for the agent process, e.g. `DSH_PERMISSION_MODE: danger-full-access`. Tracker credential names are refused. |
 | `harness.continuation_prompt` | built-in | Guidance sent to turns after the first |
 | `hooks.shell` | platform default | Hook shell, e.g. `bash -lc` or `pwsh -NoProfile -Command` |
 | `tools.enabled` | `true` | Host-side tracker tools + generated shim |
@@ -409,12 +410,16 @@ tracker tools host-side and exposes them through a loopback endpoint guarded by 
 workspace gets a generated shim, advertised in the prompt:
 
 ```bash
-node "<workspace.root>/.symphony/agent-tools.mjs" issue_comment '{"body":"Fixed in abc123"}'
 node "<workspace.root>/.symphony/agent-tools.mjs" issue_add_labels '{"labels":["status:review"]}'
+node "<workspace.root>/.symphony/agent-tools.mjs" workspace_push '{}'
+node "<workspace.root>/.symphony/agent-tools.mjs" pull_request_open '{"title":"...","body":"..."}'
 ```
 
 GitHub tools: `issue_comment`, `issue_add_labels`, `issue_remove_label`, `issue_set_state`,
-`issue_update`, `issue_get`. Tokens are scoped to one running attempt and revoked when the attempt ends.
+`issue_update`, `issue_get`, plus the publish tools `workspace_push` and `pull_request_open` (advertised
+only when the adapter supports them; they push the issue branch and open the PR into
+`provider.base_branch`, default `main`). Tokens are scoped to one running attempt and revoked when the
+attempt ends; the git credential never enters the agent's environment or `.git/config`.
 Disable with `tools.enabled: false`; disable only the prompt hint with `tools.prompt_hint: false`.
 
 ---

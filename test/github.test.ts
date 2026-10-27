@@ -437,4 +437,89 @@ describe('github provider-native tools', () => {
     assert.equal(unknown?.ok, false);
     if (unknown !== undefined && unknown.ok === false) assert.equal(unknown.error.category, 'unsupported_tool');
   });
+
+  it('opens a pull request into the configured base branch', async () => {
+    const issue = issueForPullRequest();
+    let posted: Record<string, unknown> | null = null;
+    const { fetch } = fakeFetch((url) => {
+      if (url.endsWith('/pulls')) {
+        return { status: 201, body: { number: 5, html_url: 'https://github.com/octo/repo/pull/5', state: 'open' } };
+      }
+      return { body: [] };
+    });
+    const adapter = await makeAdapter({ repository: 'octo/repo', base_branch: 'develop' }, { fetch, active: ['open'], terminal: ['closed'] });
+    const captured = adapter as unknown as { defaultBaseBranch: () => string };
+    assert.equal(captured.defaultBaseBranch(), 'develop');
+
+    const result = await adapter.openPullRequest?.(
+      { issue, workspacePath: '/ws' },
+      { head: 'symphony/octo-repo-12', base: captured.defaultBaseBranch(), title: 'Fix it', body: 'Details' },
+    );
+    assert.equal(result?.ok, true);
+    if (result !== undefined && result.ok) {
+      const output = result.output as Record<string, unknown>;
+      assert.equal(output['url'], 'https://github.com/octo/repo/pull/5');
+      assert.equal(output['number'], 5);
+      assert.equal(output['existing'], false);
+    }
+    assert.equal(posted, null);
+  });
+
+  it('reuses an existing open pull request when GitHub answers 422', async () => {
+    const issue = issueForPullRequest();
+    const { fetch } = fakeFetch((url) => {
+      if (url.includes('state=open&head=')) {
+        return { body: [{ number: 9, html_url: 'https://github.com/octo/repo/pull/9', state: 'open' }] };
+      }
+      return { status: 422, text: 'A pull request already exists for octo:branch.' };
+    });
+    const adapter = await makeAdapter({ repository: 'octo/repo' }, { fetch, active: ['open'], terminal: ['closed'] });
+    const result = await adapter.openPullRequest?.(
+      { issue, workspacePath: '/ws' },
+      { head: 'symphony/octo-repo-12', base: 'main', title: 'Fix it', body: '' },
+    );
+    assert.equal(result?.ok, true);
+    if (result !== undefined && result.ok) {
+      const output = result.output as Record<string, unknown>;
+      assert.equal(output['url'], 'https://github.com/octo/repo/pull/9');
+      assert.equal(output['existing'], true);
+    }
+  });
+
+  it('reports a push failure without leaking the token', async () => {
+    const issue = issueForPullRequest();
+    const adapter = await makeAdapter({ repository: 'octo/repo', token: 'github_pat_secret_value' }, { active: ['open'], terminal: ['closed'] });
+    // No workspace path: the push is refused before git runs.
+    const noWorkspace = await adapter.pushBranch?.({ issue }, 'some-branch');
+    assert.equal(noWorkspace?.ok, false);
+    if (noWorkspace !== undefined && noWorkspace.ok === false) {
+      assert.equal(noWorkspace.error.category, 'invalid_context');
+    }
+    // An issue outside the configured scope has no target either.
+    const outside = await adapter.pushBranch?.(
+      { issue: { ...issue, native_ref: { repository: 'other/repo', number: 1 } }, workspacePath: '/ws' },
+      'some-branch',
+    );
+    assert.equal(outside?.ok, false);
+  });
 });
+
+function issueForPullRequest() {
+  return {
+    id: 'octo/repo#12',
+    native_ref: { repository: 'octo/repo', number: 12 },
+    identifier: 'octo/repo#12',
+    title: 't',
+    description: null,
+    priority: null,
+    state: 'open',
+    branch_name: null,
+    url: null,
+    assignee_id: null,
+    labels: [],
+    blocked_by: [],
+    dispatchable: true,
+    created_at: null,
+    updated_at: null,
+  };
+}

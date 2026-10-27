@@ -126,6 +126,9 @@ export class Orchestrator {
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private readonly workers = new Set<Promise<void>>();
   private readonly history = new Map<string, IssueHistory>();
+  /** Consecutive normal sessions per issue that ended while it was still active. */
+  private readonly continuationCycles = new Map<string, { count: number; state: string }>();
+  private readonly pausedLogged = new Set<string>();
   private ticking = false;
   private refreshRequested = false;
   private stopping = false;
@@ -229,6 +232,7 @@ export class Orchestrator {
       const candidates = sortForDispatch(fetched.value);
       for (const issue of candidates) {
         if (globalConcurrency(snapshot.config, this.state.running.size) <= 0) break;
+        if (this.continuationPaused(issue, snapshot.config)) continue;
         if (!this.shouldDispatch(issue, snapshot.config, null)) continue;
         if (!hasStateSlot(snapshot.config, this.state.running, issue.state)) {
           this.logger.debug('per-state concurrency limit reached', {
@@ -497,6 +501,44 @@ export class Orchestrator {
     });
   }
 
+  /**
+   * Continuation guard.
+   *
+   * The specification asks for a ~1s continuation retry after a normal worker
+   * exit, so an issue that stays active is re-dispatched. That is only sane when
+   * the workflow eventually hands the issue off. When an agent keeps finishing
+   * sessions without moving the issue, the loop would burn quota forever, so
+   * after `agent.max_continuation_cycles` such sessions the issue is paused and
+   * only resumes when its tracker state changes (`0` disables the guard).
+   */
+  private continuationPaused(issue: Issue, config: ServiceConfig): boolean {
+    const record = this.continuationCycles.get(issue.id);
+    if (record === undefined) return false;
+    if (normalizeState(issue.state) !== normalizeState(record.state)) {
+      this.continuationCycles.delete(issue.id);
+      this.pausedLogged.delete(issue.id);
+      return false;
+    }
+    const limit = config.agent.max_continuation_cycles;
+    if (limit <= 0 || record.count < limit) return false;
+    if (!this.pausedLogged.has(issue.id)) {
+      this.pausedLogged.add(issue.id);
+      this.logger.warn(
+        'issue paused: consecutive agent sessions ended without a handoff; change the tracker state to resume',
+        {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          sessions: record.count,
+          state: issue.state,
+          limit,
+          workspace: this.history.get(issue.id)?.workspace_path ?? null,
+        },
+      );
+      this.recordRelease(issue.id, `paused after ${record.count} sessions without a handoff`);
+    }
+    return true;
+  }
+
   /** Full dispatch eligibility (SPEC 8.2). */
   private shouldDispatch(issue: Issue, config: ServiceConfig, ignoreClaimFor: string | null): boolean {
     if (!hasRequiredIdentity(issue)) return false;
@@ -721,6 +763,24 @@ export class Orchestrator {
     if (outcome.kind === 'normal') {
       this.state.completed.add(id);
       if (history !== undefined) history.status = 'completed';
+      // Track whether this session actually moved the issue out of the active
+      // states; repeating sessions that did not are what the continuation guard
+      // pauses on.
+      if (isActiveState(entry.issue, config)) {
+        const record = this.continuationCycles.get(id) ?? { count: 0, state: entry.issue.state };
+        record.count += 1;
+        record.state = entry.issue.state;
+        this.continuationCycles.set(id, record);
+        logger.info('continuation cycle completed; issue is still active', {
+          session_id: entry.session.session_id,
+          cycle: record.count,
+          limit: config.agent.max_continuation_cycles,
+          state: entry.issue.state,
+        });
+      } else {
+        this.continuationCycles.delete(id);
+        this.pausedLogged.delete(id);
+      }
       logger.info('worker exited normally; scheduling continuation retry', {
         session_id: entry.session.session_id,
         turns: entry.session.turn_count,
@@ -843,6 +903,14 @@ export class Orchestrator {
       this.releaseClaim(issueId);
       this.recordRelease(issueId, 'released: not active or not routable');
       logger.info('retry released: issue is not active or not routable', { state: issue.state });
+      return;
+    }
+    if (this.continuationPaused(issue, config)) {
+      this.releaseClaim(issueId);
+      logger.warn('retry released: issue is paused after repeated sessions without a handoff', {
+        state: issue.state,
+        sessions: this.continuationCycles.get(issueId)?.count ?? null,
+      });
       return;
     }
     if (globalConcurrency(config, this.state.running.size) <= 0 || !hasStateSlot(config, this.state.running, issue.state)) {

@@ -23,6 +23,16 @@ export function buildChildEnv(
   secretNames: string[],
   extra: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
-  const base = stripEnvNames(parent, [...secretNames, 'SYMPHONY_TOOL_TOKEN', 'SYMPHONY_TOOL_URL', 'SYMPHONY_TOOL_SHIM']);
+  const base = stripEnvNames(parent, [
+    ...secretNames,
+    // The attempt-scoped tool credential and its pointing metadata are rebuilt
+    // for every run, so inherited leftovers are dropped first. The grant is
+    // deliberately not named *TOKEN: DSH scrubs TOKEN/SECRET/KEY/PASSWORD names
+    // from the agent's own child processes.
+    'SYMPHONY_TOOL_GRANT',
+    'SYMPHONY_TOOL_TOKEN',
+    'SYMPHONY_TOOL_URL',
+    'SYMPHONY_TOOL_SHIM',
+  ]);
   return { ...base, ...extra };
 }
