@@ -29,7 +29,7 @@ import type { ToolBridge } from '../tools/bridge.js';
 import type { WorkspaceManager } from '../workspace/manager.js';
 import { describeError, type ValidationProblem } from '../domain/errors.js';
 import { isSupportedTrackerKind } from '../tracker/registry.js';
-import { AgentRunner, type AttemptCallbacks, type AttemptResult } from '../runner/runner.js';
+import { AgentRunner, hookEnvironmentForIssue, type AttemptCallbacks, type AttemptResult } from '../runner/runner.js';
 import {
   globalConcurrency,
   hasStateSlot,
@@ -412,7 +412,7 @@ export class Orchestrator {
       entry.abort.abort();
     }
     if (options.cleanup_workspace) {
-      void this.cleanupWorkspace(snapshot, entry.identifier);
+      void this.cleanupWorkspace(snapshot, entry.issue);
     }
     if (options.reason === 'terminal' || options.reason === 'not_active') {
       this.releaseClaim(entry.issue.id);
@@ -435,7 +435,7 @@ export class Orchestrator {
     let removed = 0;
     for (const issue of result.value) {
       try {
-        await snapshot.workspace.remove(issue.identifier);
+        await snapshot.workspace.remove(issue.identifier, hookEnvironmentForIssue(issue));
         removed += 1;
       } catch (error) {
         this.logger.warn('startup workspace cleanup failed', {
@@ -451,13 +451,13 @@ export class Orchestrator {
     });
   }
 
-  private async cleanupWorkspace(snapshot: ServiceSnapshot, identifier: string): Promise<void> {
+  private async cleanupWorkspace(snapshot: ServiceSnapshot, issue: Issue): Promise<void> {
     try {
-      await snapshot.workspace.remove(identifier);
-      this.logger.info('workspace removed', { issue_identifier: identifier });
+      await snapshot.workspace.remove(issue.identifier, hookEnvironmentForIssue(issue));
+      this.logger.info('workspace removed', { issue_identifier: issue.identifier });
     } catch (error) {
       this.logger.warn('workspace cleanup failed', {
-        issue_identifier: identifier,
+        issue_identifier: issue.identifier,
         error: describeError(error),
       });
     }
@@ -833,7 +833,7 @@ export class Orchestrator {
       return;
     }
     if (isTerminalState(issue, config)) {
-      await this.cleanupWorkspace(snapshot, issue.identifier);
+      await this.cleanupWorkspace(snapshot, issue);
       this.releaseClaim(issueId);
       this.recordRelease(issueId, 'released: terminal');
       logger.info('retry released: issue is terminal', { state: issue.state });

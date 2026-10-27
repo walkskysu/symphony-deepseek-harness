@@ -31,7 +31,7 @@ tracker:
 | Key | Required | Default | Notes |
 |---|---|---|---|
 | `repository` | yes (unless `repositories`) | — | `owner/name`; a trailing `.git` is stripped |
-| `repositories` | no | `[]` | Additional `owner/name` scopes; duplicates are ignored |
+| `repositories` | no | `[]` | Additional `owner/name` scopes; duplicate selectors are ignored case-insensitively |
 | `token` | no | `$GITHUB_TOKEN` | Literal value or a single `$VAR` reference |
 | `token_env` | no | `GITHUB_TOKEN` | Environment fallback when `token` is omitted |
 | `api_base` | no | `https://api.github.com` | Must parse as an absolute URL |
@@ -42,6 +42,51 @@ tracker:
 | `require_assignee` | no | `false` | Unassigned issues are normalized with `dispatchable: false` |
 | `page_size` | no | `100` | 1..100 per request |
 | `request_timeout_ms` | no | `30000` | Per-request timeout |
+
+### Several repositories
+
+`repository` and `repositories` are both selectors for the same scope. They may be combined; the result
+is the union, in configuration order. Selecting more than one repository is supported without another
+workflow or process:
+
+```yaml
+tracker:
+  kind: github
+  provider:
+    repositories:
+      - octocat/hello-world
+      - octocat/spoon-knife
+    token: $GITHUB_TOKEN
+```
+
+Rules:
+
+- Every selector must be an `owner/name` string; a trailing `.git` is stripped.
+- A non-list `repositories` value or a non-string entry is `invalid_tracker_config`, as is an invalid
+  selector. At least one selector is required.
+- Duplicate selectors are ignored case-insensitively, because GitHub repository names are
+  case-insensitive. The first configured spelling is preserved in identifiers and `native_ref`.
+- All repositories share the same `active_states`, `terminal_states`, `required_labels`, state-source
+  and pagination settings. There is no per-repository override.
+- `fetch_issues_by_states` performs the state queries for each repository; a failure in any repository
+  fails the call. `fetch_issues_by_ids` refreshes only ids whose repository is in the configured scope.
+- Issue ids and identifiers are `owner/repo#number`, so equal issue numbers in different repositories
+  never collide. Workspaces use the sanitized, hash-suffixed identifier, so they stay distinct too.
+- Provider-native tools derive their target repository from `native_ref`; an issue in one repository
+  cannot retarget a tool call at another repository in the same scope.
+
+A multi-repository workflow needs a per-issue checkout. Workspace hooks receive
+`SYMPHONY_ISSUE_NATIVE_REF` (JSON containing `repository`, `number` and `node_id`) and the other
+`SYMPHONY_ISSUE_*` variables documented in the README, so one `after_create` hook can clone the right
+repository:
+
+```yaml
+hooks:
+  after_create: |
+    git clone --depth 1 "https://github.com/$(node -p 'JSON.parse(process.env.SYMPHONY_ISSUE_NATIVE_REF).repository').git" .
+```
+
+The `$(...)` substitution works in both POSIX shells and PowerShell.
 
 ### Secrets
 

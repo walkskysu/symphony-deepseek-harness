@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createGitHubAdapter, priorityFromLabels, deriveLabelState } from '../src/tracker/github.js';
 import { normalizeLabels, parseInstant, normalizePriority } from '../src/tracker/normalize.js';
 import type { TrackerAdapter } from '../src/tracker/adapter.js';
+import { makeIssue } from './helpers.js';
 
 interface FakeResponseInit {
   status?: number;
@@ -168,6 +169,7 @@ describe('github adapter configuration', () => {
     const adapter = await makeAdapter({ repository: 'octo/repo' });
     assert.equal(adapter.profile.kind, 'github');
     assert.ok(adapter.profile.tool_names.includes('issue_comment'));
+    assert.ok(adapter.profile.optional_provider_keys['repositories']?.includes('list of owner/name scopes'));
     assert.deepEqual(adapter.profile.default_states, { active_states: ['open'], terminal_states: ['closed'] });
   });
 
@@ -373,6 +375,117 @@ describe('github issue reads', () => {
   });
 });
 
+describe('github multi-repository scope', () => {
+  it('accepts `repositories` without a singular `repository` and reads every scope', async () => {
+    const { fetch, urls } = fakeFetch((url) => {
+      if (url.includes('/repos/octo/alpha/issues')) {
+        return { body: [issuePayload({ number: 1, title: 'alpha issue' })] };
+      }
+      if (url.includes('/repos/octo/beta/issues')) {
+        return { body: [issuePayload({ number: 1, title: 'beta issue' })] };
+      }
+      return { body: [] };
+    });
+    const adapter = await makeAdapter(
+      { repositories: ['octo/alpha', 'octo/beta'] },
+      { fetch, active: ['open'], terminal: ['closed'] },
+    );
+    const result = await adapter.fetchIssuesByStates(['open']);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(
+      result.value.map((issue) => issue.id),
+      ['octo/alpha#1', 'octo/beta#1'],
+    );
+    assert.deepEqual(
+      result.value.map((issue) => issue.native_ref?.['repository']),
+      ['octo/alpha', 'octo/beta'],
+    );
+    assert.equal(urls.filter((url) => url.includes('/repos/octo/alpha/issues')).length, 1);
+    assert.equal(urls.filter((url) => url.includes('/repos/octo/beta/issues')).length, 1);
+  });
+
+  it('combines `repository` and `repositories` and de-duplicates case-insensitively', async () => {
+    const { fetch, urls } = fakeFetch((url) => {
+      if (url.includes('/repos/Octo/Alpha/issues')) {
+        return { body: [issuePayload({ number: 3, title: 'alpha' })] };
+      }
+      return { body: [issuePayload({ number: 4, title: 'beta' })] };
+    });
+    const adapter = await makeAdapter(
+      {
+        repository: 'Octo/Alpha',
+        repositories: ['octo/alpha', 'OCTO/BETA', 'octo/beta'],
+      },
+      { fetch, active: ['open'], terminal: ['closed'] },
+    );
+    const result = await adapter.fetchIssuesByStates(['open']);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(
+      result.value.map((issue) => issue.id),
+      ['Octo/Alpha#3', 'OCTO/BETA#4'],
+    );
+    assert.equal(urls.filter((url) => url.includes('/repos/Octo/Alpha/issues')).length, 1);
+    assert.equal(urls.filter((url) => url.includes('/repos/OCTO/BETA/issues')).length, 1);
+    assert.equal(urls.length, 2);
+  });
+
+  it('refreshes ids across repositories and treats repeated ids as a set', async () => {
+    const { fetch, urls } = fakeFetch((url) => {
+      const number = Number(/\/issues\/(\d+)$/.exec(url)?.[1]);
+      return { body: issuePayload({ number, title: url.includes('/alpha/') ? 'alpha' : 'beta' }) };
+    });
+    const adapter = await makeAdapter(
+      { repositories: ['octo/alpha', 'octo/beta'] },
+      { fetch, active: ['open'], terminal: ['closed'] },
+    );
+    const result = await adapter.fetchIssuesByIds(['octo/alpha#2', 'octo/beta#7', 'octo/alpha#2']);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(
+      result.value.map((issue) => issue.id),
+      ['octo/alpha#2', 'octo/beta#7'],
+    );
+    assert.equal(urls.length, 2);
+    assert.ok(urls.some((url) => url.endsWith('/repos/octo/alpha/issues/2')));
+    assert.ok(urls.some((url) => url.endsWith('/repos/octo/beta/issues/7')));
+  });
+
+  it('matches a refresh id case-insensitively against the configured scope', async () => {
+    const { fetch, urls } = fakeFetch(() => ({ body: issuePayload({ number: 12 }) }));
+    const adapter = await makeAdapter(
+      { repository: 'Octo/Repo' },
+      { fetch, active: ['open'], terminal: ['closed'] },
+    );
+    const result = await adapter.fetchIssuesByIds(['octo/repo#12']);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.value[0]?.id, 'Octo/Repo#12');
+    assert.ok(urls[0]?.endsWith('/repos/Octo/Repo/issues/12'));
+  });
+
+  it('rejects malformed multi-repository configuration', async () => {
+    const invalidProviders: Array<Record<string, unknown>> = [
+      { repositories: 'octo/repo' },
+      { repositories: ['not-a-repo'] },
+      { repositories: [] },
+      { repositories: ['octo/repo', 42] },
+      { repository: 42, repositories: ['octo/repo'] },
+    ];
+    for (const provider of invalidProviders) {
+      const result = createGitHubAdapter({
+        provider,
+        active_states: ['open'],
+        terminal_states: ['closed'],
+        env: { GITHUB_TOKEN: 'x' },
+      });
+      assert.equal(result.ok, false, JSON.stringify(provider));
+      if (!result.ok) assert.equal(result.error.category, 'invalid_tracker_config');
+    }
+  });
+});
+
 describe('github provider-native tools', () => {
   it('advertises tool specs with mutation flags', async () => {
     const adapter = await makeAdapter({ repository: 'octo/repo' });
@@ -410,6 +523,28 @@ describe('github provider-native tools', () => {
     const result = await adapter.executeAgentTool?.('issue_comment', { body: 'hello' }, { issue });
     assert.deepEqual(result, { ok: true, output: { commented: true, comment_url: 'https://github.com/octo/repo/issues/12#c1' } });
     assert.ok(calls[0]?.url.endsWith('/repos/octo/repo/issues/12/comments'));
+  });
+
+  it('routes a tool call to the issue repository, not another configured repository', async () => {
+    const calls: string[] = [];
+    const { fetch } = fakeFetch((url) => {
+      calls.push(url);
+      return { body: { html_url: 'https://github.com/octo/beta/issues/7#c1' } };
+    });
+    const adapter = await makeAdapter(
+      { repositories: ['octo/alpha', 'octo/beta'] },
+      { fetch, active: ['open'], terminal: ['closed'] },
+    );
+    const issue = makeIssue({
+      id: 'octo/beta#7',
+      identifier: 'octo/beta#7',
+      native_ref: { repository: 'octo/beta', number: 7 },
+    });
+    const result = await adapter.executeAgentTool?.('issue_comment', { body: 'hello' }, { issue });
+    assert.equal(result?.ok, true);
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0]?.includes('/repos/octo/beta/issues/7/comments'));
+    assert.ok(!calls[0]?.includes('/repos/octo/alpha/'));
   });
 
   it('returns a structured failure for invalid arguments and unknown tools', async () => {

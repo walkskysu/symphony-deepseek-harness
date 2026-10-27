@@ -48,6 +48,14 @@ export interface HookOutcome {
   output: string;
 }
 
+/**
+ * Extra non-secret environment variables exposed to a hook. The runner uses
+ * this to describe the current normalized issue so a workflow that covers
+ * several repositories can select the right checkout without provider-specific
+ * logic in the workspace layer.
+ */
+export type HookEnvironment = Record<string, string>;
+
 export interface WorkspaceManagerOptions {
   workspace: WorkspaceConfig;
   hooks: HooksConfig;
@@ -88,13 +96,14 @@ export class WorkspaceManager {
    *
    * @throws when the directory cannot be created or the hook fails.
    */
-  async ensure(identifier: string): Promise<Workspace> {
+  async ensure(identifier: string, environment: HookEnvironment = {}): Promise<Workspace> {
     const { path, workspace_key } = this.pathFor(identifier);
     const createdNow = await this.ensureDirectory(path);
     if (createdNow === false) return { path, workspace_key, created_now: false };
 
     const outcome = await this.runHook('after_create', this.options.hooks.after_create, path, {
       issue_identifier: identifier,
+      environment,
     });
     if (outcome !== null && outcome.ok === false) {
       // Workspace creation failure is fatal; remove the partially prepared dir.
@@ -127,9 +136,10 @@ export class WorkspaceManager {
   }
 
   /** Run `before_run`; failure aborts the current attempt. */
-  async beforeRun(workspacePath: string, issueIdentifier?: string): Promise<void> {
+  async beforeRun(workspacePath: string, issueIdentifier?: string, environment: HookEnvironment = {}): Promise<void> {
     const outcome = await this.runHook('before_run', this.options.hooks.before_run, workspacePath, {
       ...(issueIdentifier === undefined ? {} : { issue_identifier: issueIdentifier }),
+      environment,
     });
     if (outcome !== null && outcome.ok === false) {
       throw new Error(
@@ -139,15 +149,16 @@ export class WorkspaceManager {
   }
 
   /** Run `after_run`; failures are logged and ignored. */
-  async afterRun(workspacePath: string, issueIdentifier?: string): Promise<void> {
+  async afterRun(workspacePath: string, issueIdentifier?: string, environment: HookEnvironment = {}): Promise<void> {
     await this.runHook('after_run', this.options.hooks.after_run, workspacePath, {
       ignoreFailure: true,
       ...(issueIdentifier === undefined ? {} : { issue_identifier: issueIdentifier }),
+      environment,
     });
   }
 
   /** Remove a workspace, running `before_remove` when the directory exists. */
-  async remove(identifier: string): Promise<void> {
+  async remove(identifier: string, environment: HookEnvironment = {}): Promise<void> {
     const { path } = this.pathFor(identifier);
     let exists = false;
     try {
@@ -159,6 +170,7 @@ export class WorkspaceManager {
     await this.runHook('before_remove', this.options.hooks.before_remove, path, {
       ignoreFailure: true,
       issue_identifier: identifier,
+      environment,
     });
     await rm(path, { recursive: true, force: true });
   }
@@ -177,7 +189,7 @@ export class WorkspaceManager {
     hook: 'after_create' | 'before_run' | 'after_run' | 'before_remove',
     script: string | null,
     workspacePath: string,
-    options: { ignoreFailure?: boolean; issue_identifier?: string } = {},
+    options: { ignoreFailure?: boolean; issue_identifier?: string; environment?: HookEnvironment } = {},
   ): Promise<HookOutcome | null> {
     if (script === null || script.trim() === '') return null;
     const shell = this.options.shell ?? resolveShell(this.options.hooks.shell);
@@ -186,7 +198,8 @@ export class WorkspaceManager {
     this.options.logger.info('hook started', { hook, workspace: workspacePath, ...context });
     const result = await runShellScript(shell, script, {
       cwd: workspacePath,
-      env: this.options.env ?? process.env,
+      // Issue context is additive: hooks still see the process/.env environment.
+      env: { ...(this.options.env ?? process.env), ...(options.environment ?? {}) },
       timeoutMs: this.options.hooks.timeout_ms,
     });
     const outcome: HookOutcome = {
